@@ -1,0 +1,205 @@
+const express = require("express");
+const router = express.Router();
+const db = require("../db");
+const authenticateAndAuthorize = require("../middleware/authMiddleware");
+
+// Helper to wrap db.query
+const query = (sql, params) => new Promise((resolve, reject) => {
+    db.query(sql, params, (err, result) => {
+        if (err) reject(err); else resolve(result);
+    });
+});
+
+// Create Purchase (Header Only or with items)
+router.post("/create", authenticateAndAuthorize(), async (req, res) => {
+  const { date, bill_no, vehicle_no, items } = req.body;
+
+  if (!date || !bill_no) {
+    return res.status(400).json({ success: false, message: "Missing required fields" });
+  }
+
+  try {
+    const basicProductCode = (items && items.length > 0) ? items[0].product_code : "";
+    const basicQuantity = (items && items.length > 0) ? items[0].quantity : 0;
+
+    const insertQuery = "INSERT INTO purchase (date, bill_no, vehicle_no, product_code, quantity) VALUES (?, ?, ?, ?, ?)";
+    const purchaseResult = await query(insertQuery, [date, bill_no, vehicle_no || "", basicProductCode, basicQuantity]);
+    const purchaseId = purchaseResult.insertId;
+
+    if (items && items.length > 0) {
+      for (const item of items) {
+        const parsedQuantity = parseInt(item.quantity, 10);
+        
+        const insertItemQuery = "INSERT INTO purchase_items (purchase_id, product_code, product_name, gradation, quantity) VALUES (?, ?, ?, ?, ?)";
+        await query(insertItemQuery, [purchaseId, item.product_code, item.product_name, item.gradation, parsedQuantity]);
+        
+        const updateProductQuery = "UPDATE product SET quantity = quantity + ? WHERE product_code = ?";
+        await query(updateProductQuery, [parsedQuantity, item.product_code]);
+      }
+    }
+
+    res.json({ success: true, message: "Purchase created successfully", insertedId: purchaseId });
+  } catch (err) {
+    console.error("Purchase Insert Error:", err);
+    res.status(500).json({ success: false, message: "Insert Error", error: err.message });
+  }
+});
+
+// Add Single Item to existing Purchase
+router.post("/add-item/:id", authenticateAndAuthorize(), async (req, res) => {
+  const purchaseId = req.params.id;
+  const { product_code, product_name, gradation, quantity } = req.body;
+
+  if (!product_code || !quantity) {
+    return res.status(400).json({ success: false, message: "Product and Quantity are required" });
+  }
+
+  try {
+    const parsedQuantity = parseInt(quantity, 10);
+    
+    // Insert into items
+    const insertItemQuery = "INSERT INTO purchase_items (purchase_id, product_code, product_name, gradation, quantity) VALUES (?, ?, ?, ?, ?)";
+    await query(insertItemQuery, [purchaseId, product_code, product_name, gradation, parsedQuantity]);
+    
+    // Add to main stock
+    const updateProductQuery = "UPDATE product SET quantity = quantity + ? WHERE product_code = ?";
+    await query(updateProductQuery, [parsedQuantity, product_code]);
+
+    res.json({ success: true, message: "Item added successfully" });
+  } catch (err) {
+    console.error("Item Insert Error:", err);
+    res.status(500).json({ success: false, message: "Item Insert Error", error: err.message });
+  }
+});
+
+// Update Purchase
+router.put("/update/:id", authenticateAndAuthorize(), async (req, res) => {
+  const purchaseId = req.params.id;
+  const { date, bill_no, vehicle_no, items } = req.body;
+
+  const itemsToProcess = items || [];
+
+  if (!date || !bill_no) {
+    return res.status(400).json({ success: false, message: "Missing required fields" });
+  }
+
+  try {
+    // 1. Fetch current (old) items to calculate Virtual Stock
+    const oldItems = await query("SELECT * FROM purchase_items WHERE purchase_id = ?", [purchaseId]);
+    
+    const oldQuantityMap = {};
+    for (const old of oldItems) {
+       oldQuantityMap[old.product_code] = (oldQuantityMap[old.product_code] || 0) + old.quantity;
+    }
+
+    // 2. Validate new items (Purchases subtract from Virtual Stock to ensure we don't accidentally drop below zero if we deduct an old purchase)
+    for (const item of itemsToProcess) {
+      const parsedQuantity = parseInt(item.quantity, 10);
+      const stockResult = await query("SELECT quantity FROM product WHERE product_code = ?", [item.product_code]);
+      
+      if (stockResult.length !== 0) {
+         const actualStock = stockResult[0].quantity;
+         const removingStock = oldQuantityMap[item.product_code] || 0;
+         const virtualStock = actualStock - removingStock;
+
+         if (virtualStock + parsedQuantity < 0) {
+            return res.status(400).json({ success: false, message: `Cannot update purchase. Replacing this order would push ${item.product_code} stock below 0.` });
+         }
+      }
+    }
+
+    // --- Validation Passed. Proceed with Mutations. ---
+
+    // 3. Revert old stock values
+    for (const old of oldItems) {
+      await query("UPDATE product SET quantity = quantity - ? WHERE product_code = ?", [old.quantity, old.product_code]);
+    }
+
+    // 4. Clear old items
+    await query("DELETE FROM purchase_items WHERE purchase_id = ?", [purchaseId]);
+
+    // 5. Update main record
+    const basicProductCode = itemsToProcess[0]?.product_code || "";
+    const basicQuantity = itemsToProcess[0]?.quantity || 0;
+    await query(
+      "UPDATE purchase SET date=?, bill_no=?, vehicle_no=?, product_code=?, quantity=? WHERE id=?",
+      [date, bill_no, vehicle_no || "", basicProductCode, basicQuantity, purchaseId]
+    );
+
+    // 6. Insert new items & add to stock
+    for (const item of itemsToProcess) {
+      const parsedQuantity = parseInt(item.quantity, 10);
+      await query(
+        "INSERT INTO purchase_items (purchase_id, product_code, product_name, gradation, quantity) VALUES (?, ?, ?, ?, ?)",
+        [purchaseId, item.product_code, item.product_name, item.gradation, parsedQuantity]
+      );
+      await query("UPDATE product SET quantity = quantity + ? WHERE product_code = ?", [parsedQuantity, item.product_code]);
+    }
+
+    res.json({ success: true, message: "Purchase updated successfully" });
+  } catch (err) {
+    console.error("Purchase Update Error:", err);
+    res.status(500).json({ success: false, message: "Update Error", error: err.message });
+  }
+});
+
+// Delete Purchase
+router.delete("/delete/:id", authenticateAndAuthorize(), async (req, res) => {
+  const purchaseId = req.params.id;
+  
+  try {
+    // 1. Fetch items to validate stock deletion BEFORE executing
+    const oldItems = await query("SELECT * FROM purchase_items WHERE purchase_id = ?", [purchaseId]);
+    
+    // Check if reverting this purchase will drop stock below zero
+    for (const old of oldItems) {
+      const stockResult = await query("SELECT quantity FROM product WHERE product_code = ?", [old.product_code]);
+      if (stockResult.length > 0) {
+        if (stockResult[0].quantity - old.quantity < 0) {
+           return res.status(400).json({ success: false, message: `Cannot delete purchase. Product ${old.product_code} has already been sold. Deleting this would push stock to negative.` });
+        }
+      }
+    }
+
+    // 2. Revert stock
+    for (const old of oldItems) {
+      await query("UPDATE product SET quantity = quantity - ? WHERE product_code = ?", [old.quantity, old.product_code]);
+    }
+
+    // 2. Delete from DB 
+    await query("DELETE FROM purchase WHERE id = ?", [purchaseId]);
+    // Optionally clean up purchase_items if NO CASCADE is set
+    await query("DELETE FROM purchase_items WHERE purchase_id = ?", [purchaseId]);
+    
+    res.json({ success: true, message: "Purchase deleted successfully" });
+  } catch (err) {
+    console.error("Purchase Delete Error:", err);
+    res.status(500).json({ success: false, message: "Delete Error", error: err.message });
+  }
+});
+
+// Get All Purchases
+router.get("/read", authenticateAndAuthorize(), (req, res) => {
+  const getQuery = `
+    SELECT p.*,
+           (SELECT COUNT(*) FROM purchase_items pi WHERE pi.purchase_id = p.id) as items_count
+    FROM purchase p 
+    ORDER BY p.id DESC
+  `;
+  db.query(getQuery, (err, purchaseResults) => {
+    if (err) return res.status(500).json({ success: false, message: "DB Error", error: err.message });
+    
+    const itemsQuery = "SELECT * FROM purchase_items";
+    db.query(itemsQuery, (err2, itemResults) => {
+      if (err2) return res.status(500).json({ success: false, message: "DB Items Error", error: err2.message });
+      
+      const purchasesWithItems = purchaseResults.map(p => ({
+        ...p,
+        items: itemResults.filter(i => i.purchase_id === p.id)
+      }));
+      res.json({ success: true, data: purchasesWithItems });
+    });
+  });
+});
+
+module.exports = router;
