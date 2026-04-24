@@ -12,7 +12,7 @@ const query = (sql, params) => new Promise((resolve, reject) => {
 
 // Create Sale
 router.post("/create", authenticateAndAuthorize(), async (req, res) => {
-  const { date, bill_no, customer_name, vehicle_no, items } = req.body;
+  const { date, bill_no, customer_name, vehicle_no, driver_number, items } = req.body;
 
   if (!date || !bill_no || !customer_name) {
     return res.status(400).json({ success: false, message: "Missing required fields" });
@@ -38,8 +38,8 @@ router.post("/create", authenticateAndAuthorize(), async (req, res) => {
     const basicProductCode = itemsToProcess[0]?.product_code || "";
     const basicQuantity = itemsToProcess[0]?.quantity || 0;
 
-    const insertQuery = "INSERT INTO sales (date, bill_no, customer_name, vehicle_no, product_code, quantity) VALUES (?, ?, ?, ?, ?, ?)";
-    const insertResult = await query(insertQuery, [date, bill_no, customer_name, vehicle_no || "", basicProductCode, basicQuantity]);
+    const insertQuery = "INSERT INTO sales (date, bill_no, customer_name, vehicle_no, driver_number, product_code, quantity) VALUES (?, ?, ?, ?, ?, ?, ?)";
+    const insertResult = await query(insertQuery, [date, bill_no, customer_name, vehicle_no || "", driver_number || "", basicProductCode, basicQuantity]);
     const salesId = insertResult.insertId;
 
     for (const item of itemsToProcess) {
@@ -63,7 +63,7 @@ router.post("/create", authenticateAndAuthorize(), async (req, res) => {
 // Update Sale
 router.put("/update/:id", authenticateAndAuthorize(), async (req, res) => {
   const saleId = req.params.id;
-  const { date, bill_no, customer_name, vehicle_no, items } = req.body;
+  const { date, bill_no, customer_name, vehicle_no, driver_number, items } = req.body;
 
   const itemsToProcess = items || [];
 
@@ -113,8 +113,8 @@ router.put("/update/:id", authenticateAndAuthorize(), async (req, res) => {
     const basicProductCode = itemsToProcess[0]?.product_code || "";
     const basicQuantity = itemsToProcess[0]?.quantity || 0;
     await query(
-      "UPDATE sales SET date=?, bill_no=?, customer_name=?, vehicle_no=?, product_code=?, quantity=? WHERE id=?",
-      [date, bill_no, customer_name, vehicle_no || "", basicProductCode, basicQuantity, saleId]
+      "UPDATE sales SET date=?, bill_no=?, customer_name=?, vehicle_no=?, driver_number=?, product_code=?, quantity=? WHERE id=?",
+      [date, bill_no, customer_name, vehicle_no || "", driver_number || "", basicProductCode, basicQuantity, saleId]
     );
 
     // 5. Insert new items & decrement stock

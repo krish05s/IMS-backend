@@ -5,7 +5,7 @@ const authenticateAndAuthorize = require("../middleware/authMiddleware");
 
 // Create Product
 router.post("/create", authenticateAndAuthorize(), (req, res) => {
-  const { product_name, gradation_id, gradation, quantity } = req.body;
+  const { product_name, gradation_id, gradation, quantity, unit } = req.body;
 
   if (!product_name || !gradation_id) {
     return res.status(400).json({ success: false, message: "Product name and Gradation are required" });
@@ -46,10 +46,10 @@ router.post("/create", authenticateAndAuthorize(), (req, res) => {
         }
       }
 
-      const insertQuery = "INSERT INTO product (product_name, product_code, gradation_id, gradation, quantity) VALUES (?, ?, ?, ?, ?)";
+      const insertQuery = "INSERT INTO product (product_name, product_code, gradation_id, gradation, quantity, unit) VALUES (?, ?, ?, ?, ?, ?)";
       const prodQty = quantity || 0;
       
-      db.query(insertQuery, [product_name, nextCode, gradation_id, gradation, prodQty], (err, insertResult) => {
+      db.query(insertQuery, [product_name, nextCode, gradation_id, gradation, prodQty, unit || 'Kg'], (err, insertResult) => {
         if (err) return res.status(500).json({ success: false, message: "Insert Error", error: err.message });
         res.json({ success: true, message: "Product created successfully", insertedId: insertResult.insertId, product_code: nextCode });
       });
@@ -68,7 +68,7 @@ router.get("/read", authenticateAndAuthorize(), (req, res) => {
 // Update Product
 router.put("/update/:id", authenticateAndAuthorize(), (req, res) => {
   const { id } = req.params;
-  const { product_name, gradation_id, gradation, quantity } = req.body;
+  const { product_name, gradation_id, gradation, quantity, unit } = req.body;
 
   if (!product_name || !gradation_id) {
     return res.status(400).json({ success: false, message: "Product name and Gradation are required" });
@@ -83,10 +83,10 @@ router.put("/update/:id", authenticateAndAuthorize(), (req, res) => {
       return res.json({ success: false, message: "Product with this name and gradation already exists" });
     }
 
-    const updateQuery = "UPDATE product SET product_name=?, gradation_id=?, gradation=?, quantity=? WHERE id=?";
+    const updateQuery = "UPDATE product SET product_name=?, gradation_id=?, gradation=?, quantity=?, unit=? WHERE id=?";
     const prodQty = quantity !== undefined ? quantity : 0;
 
-    db.query(updateQuery, [product_name, gradation_id, gradation, prodQty, id], (err, updateResult) => {
+    db.query(updateQuery, [product_name, gradation_id, gradation, prodQty, unit || 'Kg', id], (err, updateResult) => {
       if (err) return res.status(500).json({ success: false, message: "DB Error", error: err.message });
       res.json({ success: true, message: "Product updated successfully" });
     });

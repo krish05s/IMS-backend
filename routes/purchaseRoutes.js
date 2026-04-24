@@ -12,7 +12,7 @@ const query = (sql, params) => new Promise((resolve, reject) => {
 
 // Create Purchase (Header Only or with items)
 router.post("/create", authenticateAndAuthorize(), async (req, res) => {
-  const { date, bill_no, vehicle_no, items } = req.body;
+  const { date, bill_no, vehicle_no, driver_number, items } = req.body;
 
   if (!date || !bill_no) {
     return res.status(400).json({ success: false, message: "Missing required fields" });
@@ -22,8 +22,8 @@ router.post("/create", authenticateAndAuthorize(), async (req, res) => {
     const basicProductCode = (items && items.length > 0) ? items[0].product_code : "";
     const basicQuantity = (items && items.length > 0) ? items[0].quantity : 0;
 
-    const insertQuery = "INSERT INTO purchase (date, bill_no, vehicle_no, product_code, quantity) VALUES (?, ?, ?, ?, ?)";
-    const purchaseResult = await query(insertQuery, [date, bill_no, vehicle_no || "", basicProductCode, basicQuantity]);
+    const insertQuery = "INSERT INTO purchase (date, bill_no, vehicle_no, driver_number, product_code, quantity) VALUES (?, ?, ?, ?, ?, ?)";
+    const purchaseResult = await query(insertQuery, [date, bill_no, vehicle_no || "", driver_number || "", basicProductCode, basicQuantity]);
     const purchaseId = purchaseResult.insertId;
 
     if (items && items.length > 0) {
@@ -75,7 +75,7 @@ router.post("/add-item/:id", authenticateAndAuthorize(), async (req, res) => {
 // Update Purchase
 router.put("/update/:id", authenticateAndAuthorize(), async (req, res) => {
   const purchaseId = req.params.id;
-  const { date, bill_no, vehicle_no, items } = req.body;
+  const { date, bill_no, vehicle_no, driver_number, items } = req.body;
 
   const itemsToProcess = items || [];
 
@@ -122,8 +122,8 @@ router.put("/update/:id", authenticateAndAuthorize(), async (req, res) => {
     const basicProductCode = itemsToProcess[0]?.product_code || "";
     const basicQuantity = itemsToProcess[0]?.quantity || 0;
     await query(
-      "UPDATE purchase SET date=?, bill_no=?, vehicle_no=?, product_code=?, quantity=? WHERE id=?",
-      [date, bill_no, vehicle_no || "", basicProductCode, basicQuantity, purchaseId]
+      "UPDATE purchase SET date=?, bill_no=?, vehicle_no=?, driver_number=?, product_code=?, quantity=? WHERE id=?",
+      [date, bill_no, vehicle_no || "", driver_number || "", basicProductCode, basicQuantity, purchaseId]
     );
 
     // 6. Insert new items & add to stock
