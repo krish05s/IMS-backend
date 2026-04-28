@@ -37,9 +37,10 @@ router.post("/create", authenticateAndAuthorize(), async (req, res) => {
 
     const basicProductCode = itemsToProcess[0]?.product_code || "";
     const basicQuantity = itemsToProcess[0]?.quantity || 0;
+    const created_by = req.user.name;
 
-    const insertQuery = "INSERT INTO sales (date, bill_no, customer_name, vehicle_no, driver_number, product_code, quantity) VALUES (?, ?, ?, ?, ?, ?, ?)";
-    const insertResult = await query(insertQuery, [date, bill_no, customer_name, vehicle_no || "", driver_number || "", basicProductCode, basicQuantity]);
+    const insertQuery = "INSERT INTO sales (date, bill_no, customer_name, vehicle_no, driver_number, product_code, quantity, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)";
+    const insertResult = await query(insertQuery, [date, bill_no, customer_name, vehicle_no || "", driver_number || "", basicProductCode, basicQuantity, created_by]);
     const salesId = insertResult.insertId;
 
     for (const item of itemsToProcess) {

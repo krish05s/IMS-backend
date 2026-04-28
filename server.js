@@ -10,6 +10,7 @@ const productRoutes = require("./routes/productRoutes");
 const purchaseRoutes = require("./routes/purchaseRoutes");
 const salesRoutes = require("./routes/salesRoutes");
 const vehicleRoutes = require("./routes/vehicleRoutes");
+const partyRoutes = require("./routes/partyRoutes");
 
 const app = express();
 app.use(cors({ origin: process.env.CLIENT_URL, credentials: true }));
@@ -27,6 +28,7 @@ app.use("/api/product", productRoutes);
 app.use("/api/purchase", purchaseRoutes);
 app.use("/api/sales", salesRoutes);
 app.use("/api/vehicle", vehicleRoutes);
+app.use("/api/party", partyRoutes);
 
 
 app.listen(process.env.PORT || 5000, () => {
