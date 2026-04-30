@@ -12,9 +12,9 @@ const query = (sql, params) => new Promise((resolve, reject) => {
 
 // Create Purchase (Header Only or with items)
 router.post("/create", authenticateAndAuthorize(), async (req, res) => {
-  const { date, bill_no, party_name, vehicle_no, driver_number, items } = req.body;
+  const { date, bill_no, party_name, vehicle_no, driver_name, driver_number, transporter_name, lr_number, items } = req.body;
 
-  if (!date || !bill_no) {
+  if (!date || !bill_no || !driver_name) {
     return res.status(400).json({ success: false, message: "Missing required fields" });
   }
 
@@ -23,8 +23,8 @@ router.post("/create", authenticateAndAuthorize(), async (req, res) => {
     const basicQuantity = (items && items.length > 0) ? items[0].quantity : 0;
     const created_by = req.user.name;
 
-    const insertQuery = "INSERT INTO purchase (date, bill_no, party_name, vehicle_no, driver_number, product_code, quantity, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)";
-    const purchaseResult = await query(insertQuery, [date, bill_no, party_name || null, vehicle_no || "", driver_number || "", basicProductCode, basicQuantity, created_by]);
+    const insertQuery = "INSERT INTO purchase (date, bill_no, party_name, vehicle_no, driver_name, driver_number, transporter_name, lr_number, product_code, quantity, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+    const purchaseResult = await query(insertQuery, [date, bill_no, party_name || null, vehicle_no || "", driver_name, driver_number || "", transporter_name || "", lr_number || "", basicProductCode, basicQuantity, created_by]);
     const purchaseId = purchaseResult.insertId;
 
     if (items && items.length > 0) {
@@ -76,11 +76,11 @@ router.post("/add-item/:id", authenticateAndAuthorize(), async (req, res) => {
 // Update Purchase
 router.put("/update/:id", authenticateAndAuthorize(), async (req, res) => {
   const purchaseId = req.params.id;
-  const { date, bill_no, party_name, vehicle_no, driver_number, items } = req.body;
+  const { date, bill_no, party_name, vehicle_no, driver_name, driver_number, transporter_name, lr_number, items } = req.body;
 
   const itemsToProcess = items || [];
 
-  if (!date || !bill_no) {
+  if (!date || !bill_no || !driver_name) {
     return res.status(400).json({ success: false, message: "Missing required fields" });
   }
 
@@ -123,8 +123,8 @@ router.put("/update/:id", authenticateAndAuthorize(), async (req, res) => {
     const basicProductCode = itemsToProcess[0]?.product_code || "";
     const basicQuantity = itemsToProcess[0]?.quantity || 0;
     await query(
-      "UPDATE purchase SET date=?, bill_no=?, party_name=?, vehicle_no=?, driver_number=?, product_code=?, quantity=? WHERE id=?",
-      [date, bill_no, party_name || null, vehicle_no || "", driver_number || "", basicProductCode, basicQuantity, purchaseId]
+      "UPDATE purchase SET date=?, bill_no=?, party_name=?, vehicle_no=?, driver_name=?, driver_number=?, transporter_name=?, lr_number=?, product_code=?, quantity=? WHERE id=?",
+      [date, bill_no, party_name || null, vehicle_no || "", driver_name, driver_number || "", transporter_name || "", lr_number || "", basicProductCode, basicQuantity, purchaseId]
     );
 
     // 6. Insert new items & add to stock
