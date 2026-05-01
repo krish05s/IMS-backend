@@ -146,7 +146,7 @@ router.delete(
   (req, res) => {
     const { id } = req.params;
 
-    const query = "DELETE FROM users WHERE id = ? AND role = 'user'";
+    const query = "DELETE FROM users WHERE id = ?";
 
     db.query(query, [id], (err, result) => {
       if (err) {
