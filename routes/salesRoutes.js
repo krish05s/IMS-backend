@@ -22,16 +22,22 @@ router.post("/create", authenticateAndAuthorize(), async (req, res) => {
     const itemsToProcess = items || [];
 
     // 1. Initial manual check for stock
+    const aggregatedQuantities = {};
     for (const item of itemsToProcess) {
-      const parsedQuantity = parseInt(item.quantity, 10);
-      const stockResult = await query("SELECT quantity FROM product WHERE product_code = ?", [item.product_code]);
+      const q = parseInt(item.quantity, 10) || 0;
+      aggregatedQuantities[item.product_code] = (aggregatedQuantities[item.product_code] || 0) + q;
+    }
+
+    for (const code in aggregatedQuantities) {
+      const totalNeeded = aggregatedQuantities[code];
+      const stockResult = await query("SELECT quantity, product_name FROM product WHERE product_code = ?", [code]);
       
       if (stockResult.length === 0) {
-          return res.status(400).json({ success: false, message: `Product ${item.product_code} missing in DB` });
+          return res.status(400).json({ success: false, message: `Product ${code} missing in DB` });
       }
 
-      if (stockResult[0].quantity < parsedQuantity) {
-          return res.status(400).json({ success: false, message: `Insufficient stock for product ${item.product_name} (${item.product_code})!` });
+      if (stockResult[0].quantity < totalNeeded) {
+          return res.status(400).json({ success: false, message: `Insufficient stock for product ${stockResult[0].product_name} (${code})! Available: ${stockResult[0].quantity}, Required: ${totalNeeded}` });
       }
     }
 
@@ -83,20 +89,26 @@ router.put("/update/:id", authenticateAndAuthorize(), async (req, res) => {
     }
 
     // 2. Validate new items mathematically against Virtual Stock (Actual Stock + Old Quantity)
+    const aggregatedNewQuantities = {};
     for (const item of itemsToProcess) {
-      const parsedQuantity = parseInt(item.quantity, 10);
-      const stockResult = await query("SELECT quantity FROM product WHERE product_code = ?", [item.product_code]);
+      const q = parseInt(item.quantity, 10) || 0;
+      aggregatedNewQuantities[item.product_code] = (aggregatedNewQuantities[item.product_code] || 0) + q;
+    }
+
+    for (const code in aggregatedNewQuantities) {
+      const totalNeeded = aggregatedNewQuantities[code];
+      const stockResult = await query("SELECT quantity FROM product WHERE product_code = ?", [code]);
       
       if (stockResult.length === 0) {
-         return res.status(400).json({ success: false, message: `Product ${item.product_code} not found.` });
+         return res.status(400).json({ success: false, message: `Product ${code} not found.` });
       }
       
       const actualStock = stockResult[0].quantity;
-      const returningStock = oldQuantityMap[item.product_code] || 0;
+      const returningStock = oldQuantityMap[code] || 0;
       const virtualStock = actualStock + returningStock;
 
-      if (virtualStock < parsedQuantity) {
-         return res.status(400).json({ success: false, message: `Insufficient stock for ${item.product_code}. Available: ${actualStock} (Would be ${virtualStock} after replacing old dispatch). Required: ${parsedQuantity}.` });
+      if (virtualStock < totalNeeded) {
+         return res.status(400).json({ success: false, message: `Insufficient stock for ${code}. Available: ${actualStock} (Would be ${virtualStock} after replacing old dispatch). Required: ${totalNeeded}.` });
       }
     }
 
