@@ -94,17 +94,23 @@ router.put("/update/:id", authenticateAndAuthorize(), async (req, res) => {
     }
 
     // 2. Validate new items (Purchases subtract from Virtual Stock to ensure we don't accidentally drop below zero if we deduct an old purchase)
+    const aggregatedNewQuantities = {};
     for (const item of itemsToProcess) {
-      const parsedQuantity = parseInt(item.quantity, 10);
-      const stockResult = await query("SELECT quantity FROM product WHERE product_code = ?", [item.product_code]);
+      const q = parseInt(item.quantity, 10) || 0;
+      aggregatedNewQuantities[item.product_code] = (aggregatedNewQuantities[item.product_code] || 0) + q;
+    }
+
+    for (const code in aggregatedNewQuantities) {
+      const totalNewQty = aggregatedNewQuantities[code];
+      const stockResult = await query("SELECT quantity FROM product WHERE product_code = ?", [code]);
       
       if (stockResult.length !== 0) {
          const actualStock = stockResult[0].quantity;
-         const removingStock = oldQuantityMap[item.product_code] || 0;
+         const removingStock = oldQuantityMap[code] || 0;
          const virtualStock = actualStock - removingStock;
 
-         if (virtualStock + parsedQuantity < 0) {
-            return res.status(400).json({ success: false, message: `Cannot update purchase. Replacing this order would push ${item.product_code} stock below 0.` });
+         if (virtualStock + totalNewQty < 0) {
+            return res.status(400).json({ success: false, message: `Cannot update purchase. Replacing this order would push ${code} stock below 0.` });
          }
       }
     }
@@ -149,15 +155,21 @@ router.delete("/delete/:id", authenticateAndAuthorize(), async (req, res) => {
   const purchaseId = req.params.id;
   
   try {
-    // 1. Fetch items to validate stock deletion BEFORE executing
+    // 1. Fetch items and aggregate by product code to validate stock deletion BEFORE executing
     const oldItems = await query("SELECT * FROM purchase_items WHERE purchase_id = ?", [purchaseId]);
     
-    // Check if reverting this purchase will drop stock below zero
+    const aggregatedOldQuantities = {};
     for (const old of oldItems) {
-      const stockResult = await query("SELECT quantity FROM product WHERE product_code = ?", [old.product_code]);
+      aggregatedOldQuantities[old.product_code] = (aggregatedOldQuantities[old.product_code] || 0) + old.quantity;
+    }
+
+    // Check if reverting this purchase will drop stock below zero
+    for (const code in aggregatedOldQuantities) {
+      const totalOldQty = aggregatedOldQuantities[code];
+      const stockResult = await query("SELECT quantity FROM product WHERE product_code = ?", [code]);
       if (stockResult.length > 0) {
-        if (stockResult[0].quantity - old.quantity < 0) {
-           return res.status(400).json({ success: false, message: `Cannot delete purchase. Product ${old.product_code} has already been sold. Deleting this would push stock to negative.` });
+        if (stockResult[0].quantity - totalOldQty < 0) {
+           return res.status(400).json({ success: false, message: `Cannot delete purchase. Product ${code} has already been sold. Deleting this would push stock to negative.` });
         }
       }
     }
