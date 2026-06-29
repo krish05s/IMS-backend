@@ -12,6 +12,7 @@ const salesRoutes = require("./routes/salesRoutes");
 const vehicleRoutes = require("./routes/vehicleRoutes");
 const partyRoutes = require("./routes/partyRoutes");
 const todoRoutes = require("./routes/todos");
+const exportRoutes = require("./routes/exportRoutes");
 
 const app = express();
 app.use(cors({ origin: process.env.CLIENT_URL, credentials: true }));
@@ -31,6 +32,7 @@ app.use("/api/sales", salesRoutes);
 app.use("/api/vehicle", vehicleRoutes);
 app.use("/api/party", partyRoutes);
 app.use("/api/todos", todoRoutes);
+app.use("/api/export", exportRoutes);
 
 
 app.listen(process.env.PORT || 5000, () => {
