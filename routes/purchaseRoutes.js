@@ -58,14 +58,9 @@ router.post(
       const created_by = req.user.name;
 
       // AUTO STATUS
-
-      const autoStatus =
-        items && items.length > 0
-          ? "stock_in"
-          : "pending";
+      const autoStatus = "pending";
 
       // CREATE PURCHASE
-
       const purchaseResult = await query(
         `
         INSERT INTO purchase
@@ -103,19 +98,12 @@ router.post(
 
       const purchaseId = purchaseResult.insertId;
 
-      // INSERT ITEMS + ADD STOCK
-
+      // INSERT ITEMS (DO NOT ADD STOCK YET)
       if (items && items.length > 0) {
-
         for (const item of items) {
-
-          const parsedQuantity = parseInt(
-            item.quantity,
-            10
-          );
+          const parsedQuantity = parseInt(item.quantity, 10);
 
           // INSERT ITEM
-
           await query(
             `
             INSERT INTO purchase_items
@@ -124,9 +112,10 @@ router.post(
               product_code,
               product_name,
               gradation,
-              quantity
+              quantity,
+              received_quantity
             )
-            VALUES (?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?)
             `,
             [
               purchaseId,
@@ -134,25 +123,10 @@ router.post(
               item.product_name,
               item.gradation,
               parsedQuantity,
+              0
             ]
           );
-
-          // ADD STOCK
-
-          await query(
-            `
-            UPDATE product
-            SET quantity = quantity + ?
-            WHERE product_code = ?
-            `,
-            [
-              parsedQuantity,
-              item.product_code,
-            ]
-          );
-
         }
-
       }
 
       res.json({
@@ -317,8 +291,20 @@ router.put(
 
     try {
 
-      // GET OLD ITEMS
+      // GET CURRENT PURCHASE
+      const currentPurchase = await query(
+        `SELECT status FROM purchase WHERE id = ?`,
+        [purchaseId]
+      );
 
+      if (currentPurchase.length === 0) {
+        return res.status(404).json({ success: false, message: "Purchase not found" });
+      }
+
+      const currentStatus = currentPurchase[0].status;
+      const isStockAdded = currentStatus === 'stock_in' || currentStatus === 'completed' || currentStatus === 'partially_received';
+
+      // GET OLD ITEMS
       const oldItems = await query(
         `
         SELECT *
@@ -328,47 +314,10 @@ router.put(
         [purchaseId]
       );
 
-      // REMOVE OLD STOCK
-
-      for (const old of oldItems) {
-
-        await query(
-          `
-          UPDATE product
-          SET quantity = quantity - ?
-          WHERE product_code = ?
-          `,
-          [
-            old.quantity,
-            old.product_code,
-          ]
-        );
-
-      }
-
-      // DELETE OLD ITEMS
-
-      await query(
-        `
-        DELETE FROM purchase_items
-        WHERE purchase_id = ?
-        `,
-        [purchaseId]
-      );
-
-      // RESET STATUS
-
-      await query(
-        `
-        UPDATE purchase
-        SET status = 'pending'
-        WHERE id = ?
-        `,
-        [purchaseId]
-      );
+      // RESET STATUS TO PENDING IF EDITED
+      const newStatus = isStockAdded ? 'pending' : currentStatus;
 
       // UPDATE PURCHASE
-
       const basicProductCode =
         itemsToProcess[0]?.product_code || "";
 
@@ -388,7 +337,8 @@ router.put(
           transporter_name=?,
           lr_number=?,
           product_code=?,
-          quantity=?
+          quantity=?,
+          status=?
         WHERE id=?
         `,
         [
@@ -402,71 +352,61 @@ router.put(
           lr_number || "",
           basicProductCode,
           basicQuantity,
+          newStatus,
           purchaseId,
         ]
       );
 
-      // INSERT NEW ITEMS + ADD STOCK
-
+      // PROCESS ITEMS 
       for (const item of itemsToProcess) {
+        const parsedQuantity = parseInt(item.quantity, 10);
+        
+        const existingOldItem = oldItems.find(o => o.product_code === item.product_code && (o.gradation || "") === (item.gradation || ""));
 
-        const parsedQuantity = parseInt(
-          item.quantity,
-          10
-        );
-
-        // INSERT ITEM
-
-        await query(
-          `
-          INSERT INTO purchase_items
-          (
-            purchase_id,
-            product_code,
-            product_name,
-            gradation,
-            quantity
-          )
-          VALUES (?, ?, ?, ?, ?)
-          `,
-          [
-            purchaseId,
-            item.product_code,
-            item.product_name,
-            item.gradation,
-            parsedQuantity,
-          ]
-        );
-
-        // ADD STOCK
-
-        await query(
-          `
-          UPDATE product
-          SET quantity = quantity + ?
-          WHERE product_code = ?
-          `,
-          [
-            parsedQuantity,
-            item.product_code,
-          ]
-        );
-
+        if (existingOldItem) {
+          await query(
+            `UPDATE purchase_items SET quantity = ?, product_name = ? WHERE id = ?`,
+            [parsedQuantity, item.product_name, existingOldItem.id]
+          );
+        } else {
+          await query(
+            `
+            INSERT INTO purchase_items
+            (
+              purchase_id,
+              product_code,
+              product_name,
+              gradation,
+              quantity,
+              received_quantity
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            `,
+            [
+              purchaseId,
+              item.product_code,
+              item.product_name,
+              item.gradation,
+              parsedQuantity,
+              0
+            ]
+          );
+        }
       }
 
-      // AUTO STATUS CHANGE
-
-      if (itemsToProcess.length > 0) {
-
-        await query(
-          `
-          UPDATE purchase
-          SET status = 'stock_in'
-          WHERE id = ?
-          `,
-          [purchaseId]
-        );
-
+      // HANDLE REMOVED ITEMS
+      for (const old of oldItems) {
+        const stillExists = itemsToProcess.find(i => i.product_code === old.product_code && (i.gradation || "") === (old.gradation || ""));
+        if (!stillExists) {
+          if (old.received_quantity > 0) {
+            await query(
+              `UPDATE product SET quantity = quantity - ? WHERE product_code = ?`,
+              [old.received_quantity, old.product_code]
+            );
+          }
+          await query(`DELETE FROM purchase_receipts WHERE purchase_item_id = ?`, [old.id]);
+          await query(`DELETE FROM purchase_items WHERE id = ?`, [old.id]);
+        }
       }
 
       res.json({
@@ -519,19 +459,19 @@ router.delete(
       // REMOVE STOCK
 
       for (const old of oldItems) {
-
-        await query(
-          `
-          UPDATE product
-          SET quantity = quantity - ?
-          WHERE product_code = ?
-          `,
-          [
-            old.quantity,
-            old.product_code,
-          ]
-        );
-
+        if (old.received_quantity > 0) {
+          await query(
+            `
+            UPDATE product
+            SET quantity = quantity - ?
+            WHERE product_code = ?
+            `,
+            [
+              old.received_quantity,
+              old.product_code,
+            ]
+          );
+        }
       }
 
       // DELETE ITEMS
@@ -611,18 +551,19 @@ router.delete(
       const item = itemResult[0];
 
       // REMOVE STOCK
-
-      await query(
-        `
-        UPDATE product
-        SET quantity = quantity - ?
-        WHERE product_code = ?
-        `,
-        [
-          item.quantity,
-          item.product_code,
-        ]
-      );
+      if (item.received_quantity > 0) {
+        await query(
+          `
+          UPDATE product
+          SET quantity = quantity - ?
+          WHERE product_code = ?
+          `,
+          [
+            item.received_quantity,
+            item.product_code,
+          ]
+        );
+      }
 
       // DELETE ITEM
 
@@ -774,13 +715,29 @@ router.put(
 
     try {
 
+      if (status === 'Stock In' || status === 'stock_in' || status === 'Completed' || status === 'completed') {
+        const allItems = await query(`SELECT quantity, received_quantity FROM purchase_items WHERE purchase_id = ?`, [purchaseId]);
+        let allFullyReceived = true;
+        for (const i of allItems) {
+          if (i.received_quantity < i.quantity) {
+            allFullyReceived = false;
+          }
+        }
+        if (!allFullyReceived) {
+          return res.status(400).json({
+            success: false,
+            message: `Cannot mark as ${status} until all items are fully received`,
+          });
+        }
+      }
+
       await query(
         `
         UPDATE purchase
         SET status = ?
         WHERE id = ?
         `,
-        [status, purchaseId]
+        [status === 'stock_in' ? 'Stock In' : status, purchaseId]
       );
 
       res.json({
@@ -803,6 +760,119 @@ router.put(
 
     }
 
+  }
+);
+
+// ======================================================
+// RECEIVE ITEMS
+// ======================================================
+
+router.put(
+  "/receive/:id",
+  authenticateAndAuthorize(),
+  async (req, res) => {
+    const purchaseId = req.params.id;
+    const { items } = req.body;
+
+    if (!items || !Array.isArray(items)) {
+      return res.status(400).json({ success: false, message: "Items array is required" });
+    }
+
+    try {
+      for (const item of items) {
+        if (!item.id || item.receive_qty === undefined) continue;
+        
+        const receiveQty = parseInt(item.receive_qty, 10);
+        if (receiveQty <= 0) continue;
+
+        const itemCheck = await query(`SELECT * FROM purchase_items WHERE id = ? AND purchase_id = ?`, [item.id, purchaseId]);
+        if (itemCheck.length === 0) continue;
+        
+        const dbItem = itemCheck[0];
+        const remaining = dbItem.quantity - dbItem.received_quantity;
+        
+        const actualReceive = Math.min(receiveQty, remaining);
+        if (actualReceive <= 0) continue;
+
+        await query(
+          `UPDATE purchase_items SET received_quantity = received_quantity + ? WHERE id = ?`,
+          [actualReceive, item.id]
+        );
+
+        await query(
+          `INSERT INTO purchase_receipts (purchase_id, purchase_item_id, product_code, quantity_received, received_by) VALUES (?, ?, ?, ?, ?)`,
+          [purchaseId, item.id, dbItem.product_code, actualReceive, req.user.name]
+        );
+
+        await query(
+          `UPDATE product SET quantity = quantity + ? WHERE product_code = ?`,
+          [actualReceive, dbItem.product_code]
+        );
+      }
+
+      const allItems = await query(`SELECT quantity, received_quantity FROM purchase_items WHERE purchase_id = ?`, [purchaseId]);
+      
+      let allFullyReceived = true;
+      let anyReceived = false;
+
+      for (const i of allItems) {
+        if (i.received_quantity < i.quantity) {
+          allFullyReceived = false;
+        }
+        if (i.received_quantity > 0) {
+          anyReceived = true;
+        }
+      }
+
+      let newStatus = 'pending';
+      if (allFullyReceived) {
+        newStatus = 'Stock In';
+      } else if (anyReceived) {
+        newStatus = 'pending'; // Remain pending or change to partial, but keep it from being Stock In
+      }
+
+      await query(`UPDATE purchase SET status = ? WHERE id = ?`, [newStatus, purchaseId]);
+
+      res.json({
+        success: true,
+        message: "Items received successfully",
+        newStatus: newStatus
+      });
+
+    } catch (err) {
+      console.error("Receive Items Error:", err);
+      res.status(500).json({ success: false, message: "Receive Error", error: err.message });
+    }
+  }
+);
+
+// ======================================================
+// GET RECEIPTS
+// ======================================================
+
+router.get(
+  "/receipts/:id",
+  authenticateAndAuthorize(),
+  async (req, res) => {
+    try {
+      const purchaseId = req.params.id;
+      const receipts = await query(
+        `SELECT pr.*, pi.product_name, pi.gradation 
+         FROM purchase_receipts pr
+         JOIN purchase_items pi ON pr.purchase_item_id = pi.id
+         WHERE pr.purchase_id = ?
+         ORDER BY pr.received_date DESC`,
+        [purchaseId]
+      );
+
+      res.json({
+        success: true,
+        data: receipts,
+      });
+    } catch (err) {
+      console.error("Fetch Receipts Error:", err);
+      res.status(500).json({ success: false, message: "Fetch Error", error: err.message });
+    }
   }
 );
 
