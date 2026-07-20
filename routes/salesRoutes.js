@@ -53,70 +53,10 @@ router.post(
       const itemsToProcess = items || [];
 
       // =========================
-      // STOCK VALIDATION
-      // =========================
-
-      const aggregatedQuantities = {};
-
-      for (const item of itemsToProcess) {
-
-        const q =
-          parseInt(item.quantity, 10) || 0;
-
-        aggregatedQuantities[
-          item.product_code
-        ] =
-          (
-            aggregatedQuantities[
-              item.product_code
-            ] || 0
-          ) + q;
-
-      }
-
-      for (const code in aggregatedQuantities) {
-
-        const totalNeeded =
-          aggregatedQuantities[code];
-
-        const stockResult = await query(
-          `
-          SELECT quantity, product_name
-          FROM product
-          WHERE product_code = ?
-          `,
-          [code]
-        );
-
-        if (stockResult.length === 0) {
-          return res.status(400).json({
-            success: false,
-            message:
-              `Product ${code} missing in DB`,
-          });
-        }
-
-        if (
-          stockResult[0].quantity <
-          totalNeeded
-        ) {
-          return res.status(400).json({
-            success: false,
-            message:
-              `Insufficient stock for ${stockResult[0].product_name}`,
-          });
-        }
-
-      }
-
-      // =========================
       // AUTO STATUS
       // =========================
 
-      const autoStatus =
-        itemsToProcess.length > 0
-          ? "stock_out"
-          : "pending";
+      const autoStatus = "pending";
 
       const basicProductCode =
         itemsToProcess[0]?.product_code || "";
@@ -202,20 +142,15 @@ router.post(
         );
 
         // REMOVE STOCK
-
-        await query(
-          `
-          UPDATE product
-          SET quantity = quantity - ?
-          WHERE product_code = ?
-          `,
-          [
-            parsedQuantity,
-            item.product_code,
-          ]
-        );
+        // Deferred until status is changed to 'packed'
 
       }
+
+      // WRITE STATUS LOG
+      await query(
+        `INSERT INTO order_status_log (sales_id, from_status, to_status, actor_role, note) VALUES (?, ?, ?, ?, ?)`,
+        [salesId, null, 'pending', 'admin', 'Order created manually by Admin']
+      );
 
       res.json({
         success: true,
@@ -281,238 +216,78 @@ router.put(
     try {
 
       // =========================
-      // GET OLD ITEMS
+      // GET CURRENT SALE
       // =========================
-
-      const oldItems = await query(
-        `
-        SELECT *
-        FROM sales_items
-        WHERE sales_id = ?
-        `,
+      const currentSale = await query(
+        `SELECT status FROM sales WHERE id = ?`,
         [saleId]
       );
 
-      // =========================
-      // RETURN OLD STOCK
-      // =========================
-
-      for (const old of oldItems) {
-
-        await query(
-          `
-          UPDATE product
-          SET quantity = quantity + ?
-          WHERE product_code = ?
-          `,
-          [
-            old.quantity,
-            old.product_code,
-          ]
-        );
-
+      if (currentSale.length === 0) {
+        return res.status(404).json({ success: false, message: "Sale not found" });
       }
 
-      // =========================
-      // VALIDATE NEW STOCK
-      // =========================
+      const currentStatus = currentSale[0].status;
+      const isStockDeducted = currentStatus === 'stock_out' || currentStatus === 'completed';
 
-      const aggregatedQuantities = {};
+      let oldItems = [];
 
-      for (const item of itemsToProcess) {
+      if (isStockDeducted) {
+        // =========================
+        // GET OLD ITEMS & RETURN OLD STOCK
+        // =========================
+        oldItems = await query(`SELECT * FROM sales_items WHERE sales_id = ?`, [saleId]);
 
-        const q =
-          parseInt(item.quantity, 10) || 0;
-
-        aggregatedQuantities[
-          item.product_code
-        ] =
-          (
-            aggregatedQuantities[
-              item.product_code
-            ] || 0
-          ) + q;
-
-      }
-
-      for (const code in aggregatedQuantities) {
-
-        const totalNeeded =
-          aggregatedQuantities[code];
-
-        const stockResult = await query(
-          `
-          SELECT quantity
-          FROM product
-          WHERE product_code = ?
-          `,
-          [code]
-        );
-
-        if (
-          stockResult[0].quantity <
-          totalNeeded
-        ) {
-
-          // RESTORE OLD STOCK BACK
-
-          for (const old of oldItems) {
-
-            await query(
-              `
-              UPDATE product
-              SET quantity = quantity - ?
-              WHERE product_code = ?
-              `,
-              [
-                old.quantity,
-                old.product_code,
-              ]
-            );
-
-          }
-
-          return res.status(400).json({
-            success: false,
-            message:
-              `Insufficient stock for ${code}`,
-          });
-
+        for (const old of oldItems) {
+          await query(
+            `UPDATE product SET quantity = quantity + ? WHERE product_code = ?`,
+            [old.quantity, old.product_code]
+          );
         }
-
+        
+        // NO NEED TO VALIDATE OR DEDUCT NEW STOCK BECAUSE STATUS WILL BE RESET TO PENDING
       }
 
       // =========================
       // DELETE OLD ITEMS
       // =========================
-
-      await query(
-        `
-        DELETE FROM sales_items
-        WHERE sales_id = ?
-        `,
-        [saleId]
-      );
+      await query(`DELETE FROM sales_items WHERE sales_id = ?`, [saleId]);
 
       // =========================
-      // RESET STATUS
+      // UPDATE SALES INFO AND RESET STATUS TO PENDING IF EDITED
       // =========================
-
-      await query(
-        `
-        UPDATE sales
-        SET status = 'pending'
-        WHERE id = ?
-        `,
-        [saleId]
-      );
-
-      // =========================
-      // UPDATE SALES
-      // =========================
-
-      const basicProductCode =
-        itemsToProcess[0]?.product_code || "";
-
-      const basicQuantity =
-        itemsToProcess[0]?.quantity || 0;
+      // If we edit a sale that already had stock deducted, we reset it to pending
+      // so the user has to explicitly dispatch it again.
+      const newStatus = isStockDeducted ? 'pending' : currentStatus;
+      
+      const basicProductCode = itemsToProcess[0]?.product_code || "";
+      const basicQuantity = itemsToProcess[0]?.quantity || 0;
 
       await query(
         `
         UPDATE sales
-        SET
-          date=?,
-          bill_no=?,
-          customer_name=?,
-          vehicle_no=?,
-          driver_name=?,
-          driver_number=?,
-          transporter_name=?,
-          lr_number=?,
-          product_code=?,
-          quantity=?
+        SET date=?, bill_no=?, customer_name=?, vehicle_no=?, driver_name=?, driver_number=?, transporter_name=?, lr_number=?, product_code=?, quantity=?, status=?
         WHERE id=?
         `,
-        [
-          date,
-          bill_no,
-          customer_name,
-          vehicle_no || "",
-          driver_name,
-          driver_number || "",
-          transporter_name || "",
-          lr_number || "",
-          basicProductCode,
-          basicQuantity,
-          saleId,
-        ]
+        [date, bill_no, customer_name, vehicle_no || "", driver_name, driver_number || "", transporter_name || "", lr_number || "", basicProductCode, basicQuantity, newStatus, saleId]
       );
 
       // =========================
-      // INSERT NEW ITEMS
+      // INSERT NEW ITEMS 
       // =========================
-
       for (const item of itemsToProcess) {
-
-        const parsedQuantity = parseInt(
-          item.quantity,
-          10
-        );
-
-        // INSERT ITEM
+        const parsedQuantity = parseInt(item.quantity, 10);
 
         await query(
           `
-          INSERT INTO sales_items
-          (
-            sales_id,
-            product_code,
-            product_name,
-            gradation,
-            quantity
-          )
+          INSERT INTO sales_items (sales_id, product_code, product_name, gradation, quantity)
           VALUES (?, ?, ?, ?, ?)
           `,
-          [
-            saleId,
-            item.product_code,
-            item.product_name,
-            item.gradation,
-            parsedQuantity,
-          ]
+          [saleId, item.product_code, item.product_name, item.gradation, parsedQuantity]
         );
 
-        // REMOVE STOCK
-
-        await query(
-          `
-          UPDATE product
-          SET quantity = quantity - ?
-          WHERE product_code = ?
-          `,
-          [
-            parsedQuantity,
-            item.product_code,
-          ]
-        );
-
-      }
-
-      // =========================
-      // AUTO STATUS
-      // =========================
-
-      if (itemsToProcess.length > 0) {
-
-        await query(
-          `
-          UPDATE sales
-          SET status = 'stock_out'
-          WHERE id = ?
-          `,
-          [saleId]
-        );
-
+        // DO NOT DEDUCT STOCK HERE anymore.
+        // It's handled strictly by PUT /update-status/:id
       }
 
       res.json({
@@ -551,6 +326,12 @@ router.delete(
 
     try {
 
+      const saleResult = await query(`SELECT status FROM sales WHERE id = ?`, [saleId]);
+      if (saleResult.length === 0) {
+        return res.status(404).json({ success: false, message: "Sale not found" });
+      }
+      const isStockDeducted = saleResult[0].status === 'stock_out' || saleResult[0].status === 'completed';
+
       // GET ITEMS
 
       const oldItems = await query(
@@ -564,20 +345,20 @@ router.delete(
 
       // RETURN STOCK
 
-      for (const old of oldItems) {
-
-        await query(
-          `
-          UPDATE product
-          SET quantity = quantity + ?
-          WHERE product_code = ?
-          `,
-          [
-            old.quantity,
-            old.product_code,
-          ]
-        );
-
+      if (isStockDeducted) {
+        for (const old of oldItems) {
+          await query(
+            `
+            UPDATE product
+            SET quantity = quantity + ?
+            WHERE product_code = ?
+            `,
+            [
+              old.quantity,
+              old.product_code,
+            ]
+          );
+        }
       }
 
       // DELETE ITEMS
@@ -636,8 +417,6 @@ router.delete(
 
     try {
 
-      // GET ITEM
-
       const itemResult = await query(
         `
         SELECT *
@@ -656,19 +435,24 @@ router.delete(
 
       const item = itemResult[0];
 
-      // RETURN STOCK
+      const saleResult = await query(`SELECT status FROM sales WHERE id = ?`, [item.sales_id]);
+      const isStockDeducted = saleResult.length > 0 && (saleResult[0].status === 'stock_out' || saleResult[0].status === 'completed');
 
-      await query(
-        `
-        UPDATE product
-        SET quantity = quantity + ?
-        WHERE product_code = ?
-        `,
-        [
-          item.quantity,
-          item.product_code,
-        ]
-      );
+      // RETURN STOCK
+      
+      if (isStockDeducted) {
+        await query(
+          `
+          UPDATE product
+          SET quantity = quantity + ?
+          WHERE product_code = ?
+          `,
+          [
+            item.quantity,
+            item.product_code,
+          ]
+        );
+      }
 
       // DELETE ITEM
 
@@ -819,20 +603,105 @@ router.put(
     }
 
     try {
+      const currentSale = await query(`SELECT status, created_by FROM sales WHERE id = ?`, [salesId]);
+      if (currentSale.length === 0) {
+        return res.status(404).json({ success: false, message: "Sale not found" });
+      }
 
-      await query(
-        `
-        UPDATE sales
-        SET status = ?
-        WHERE id = ?
-        `,
-        [status, salesId]
-      );
+      const currentStatus = currentSale[0].status;
+      const targetStatus = status;
 
-      res.json({
-        success: true,
-        message: "Status updated successfully",
-      });
+      const isOnline = currentSale[0].created_by?.includes("(Online)");
+
+      const TRANSITIONS = {
+        placed:     ['approved', 'cancelled'],
+        approved:   ['packed', 'cancelled'],
+        packed:     ['dispatched', 'cancelled'],
+        dispatched: ['delivered'],
+        delivered:  [],
+        cancelled:  [],
+        pending:    ['stock_out', 'completed'],
+        stock_out:  ['completed', 'pending'],
+        completed:  [],
+      };
+
+      if (!TRANSITIONS[currentStatus]?.includes(targetStatus) && targetStatus !== currentStatus) {
+        return res.status(409).json({ success: false, message: `Illegal transition: ${currentStatus} -> ${targetStatus}` });
+      }
+
+      const deductedStatuses = ['packed', 'dispatched', 'delivered', 'stock_out', 'completed'];
+      const isCurrentDeducted = deductedStatuses.includes(currentStatus);
+      const isTargetDeducted = deductedStatuses.includes(targetStatus);
+
+      const items = await query(`SELECT * FROM sales_items WHERE sales_id = ?`, [salesId]);
+
+      // START TRANSACTION
+      await query("START TRANSACTION");
+
+      try {
+        if (!isCurrentDeducted && isTargetDeducted) {
+          // PENDING -> DEDUCTED
+          const aggregatedQuantities = {};
+          for (const item of items) {
+            const q = parseInt(item.quantity, 10) || 0;
+            aggregatedQuantities[item.product_code] = (aggregatedQuantities[item.product_code] || 0) + q;
+          }
+
+          for (const code in aggregatedQuantities) {
+            const totalNeeded = aggregatedQuantities[code];
+            const stockResult = await query(`SELECT quantity FROM product WHERE product_code = ? FOR UPDATE`, [code]);
+            if (stockResult.length === 0 || stockResult[0].quantity < totalNeeded) {
+              throw new Error(`Insufficient stock for ${code}`);
+            }
+          }
+
+          for (const item of items) {
+            await query(
+              `UPDATE product SET quantity = quantity - ? WHERE product_code = ?`,
+              [item.quantity, item.product_code]
+            );
+          }
+        } else if (isCurrentDeducted && !isTargetDeducted) {
+          // DEDUCTED -> NOT DEDUCTED
+          for (const item of items) {
+            await query(
+              `UPDATE product SET quantity = quantity + ? WHERE product_code = ?`,
+              [item.quantity, item.product_code]
+            );
+          }
+        }
+
+        // Update timestamps based on status
+        let timeUpdateSql = "";
+        if (targetStatus === 'dispatched') timeUpdateSql = ", dispatched_at = CURRENT_TIMESTAMP";
+        else if (targetStatus === 'delivered') timeUpdateSql = ", delivered_at = CURRENT_TIMESTAMP";
+
+        // Update status
+        await query(
+          `UPDATE sales SET status = ? ${timeUpdateSql} WHERE id = ?`,
+          [targetStatus, salesId]
+        );
+
+        // Insert log
+        await query(
+          `INSERT INTO order_status_log (sales_id, from_status, to_status, actor_role, note) VALUES (?, ?, ?, ?, ?)`,
+          [salesId, currentStatus, targetStatus, 'admin', 'Status updated by admin via dashboard']
+        );
+
+        // COMMIT TRANSACTION
+        await query("COMMIT");
+
+        res.json({
+          success: true,
+          message: "Status updated successfully",
+        });
+      } catch (txnErr) {
+        await query("ROLLBACK");
+        if (txnErr.message.includes("Insufficient stock")) {
+          return res.status(400).json({ success: false, message: txnErr.message });
+        }
+        throw txnErr;
+      }
 
     } catch (err) {
 

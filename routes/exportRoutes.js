@@ -30,7 +30,7 @@ router.get("/", (req, res) => {
     queryParams.push(gradation);
   }
 
-  query += ` ORDER BY created_at DESC`;
+  query += ` ORDER BY product_name ASC`;
 
   db.query(query, queryParams, (err, results) => {
     if (err) {
