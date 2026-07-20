@@ -16,8 +16,8 @@ router.post("/send-bill", async (req, res) => {
   try {
     const { phone, htmlContent, fileName, message } = req.body;
 
-    if (!phone || !htmlContent) {
-      return res.status(400).json({ success: false, message: "Missing phone or HTML content" });
+    if (!htmlContent) {
+      return res.status(400).json({ success: false, message: "Missing HTML content" });
     }
 
     // 1. Generate PDF in memory
@@ -59,94 +59,21 @@ router.post("/send-bill", async (req, res) => {
     const uploadResult = await uploadToCloudinary(pdfBuffer, fileName || "Invoice");
     const documentUrl = uploadResult.secure_url;
 
-    // 3. Send WhatsApp via Meta Cloud API
-    const whatsappToken = process.env.WHATSAPP_TOKEN;
-    const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
-
-    if (!whatsappToken || !phoneNumberId) {
-      return res.status(500).json({ success: false, message: "WhatsApp API credentials missing in backend." });
-    }
-
-    const payload = {
-      messaging_product: "whatsapp",
-      recipient_type: "individual",
-      to: phone,
-      type: "document",
-      document: {
-        link: documentUrl,
-        caption: message || "Here is your requested document.",
-        filename: `${fileName || "Invoice"}.pdf`
-      }
-    };
-
-    console.log("Sending WhatsApp payload:", JSON.stringify(payload, null, 2));
-
-    const whatsappResponse = await axios.post(
-      `https://graph.facebook.com/v17.0/${phoneNumberId}/messages`,
-      payload,
-      {
-        headers: {
-          Authorization: `Bearer ${whatsappToken}`,
-          "Content-Type": "application/json",
-        },
-      }
-    );
-
     res.status(200).json({
       success: true,
-      message: "WhatsApp sent successfully!",
-      cloudinary_url: documentUrl,
-      whatsapp_response: whatsappResponse.data
+      message: "PDF generated successfully!",
+      cloudinary_url: documentUrl
     });
 
   } catch (error) {
-    console.error("WhatsApp Send Error:", error.response?.data || error);
+    console.error("WhatsApp Send Error:", error);
     if (browser && typeof browser.close === 'function') await browser.close();
-
-    // Extract Meta API error message if available
-    let customMessage = "An error occurred while generating or sending the bill.";
-    if (error.response?.data?.error?.message) {
-      customMessage = error.response.data.error.message;
-    }
-
+    
     res.status(500).json({
       success: false,
-      message: customMessage,
+      message: "An error occurred while generating the bill.",
       error: error.message
     });
-  }
-});
-
-// --- META WEBHOOK VERIFICATION (GET) ---
-// Meta will call this URL to verify the webhook setup
-router.get("/webhook", (req, res) => {
-  const VERIFY_TOKEN = process.env.WEBHOOK_VERIFY_TOKEN;
-
-  const mode = req.query["hub.mode"];
-  const token = req.query["hub.verify_token"];
-  const challenge = req.query["hub.challenge"];
-
-  if (mode && token) {
-    if (mode === "subscribe" && token === VERIFY_TOKEN) {
-      console.log("WEBHOOK_VERIFIED");
-      res.status(200).send(challenge);
-    } else {
-      res.sendStatus(403);
-    }
-  } else {
-    res.status(400).send("Missing parameters");
-  }
-});
-
-// --- META WEBHOOK NOTIFICATIONS (POST) ---
-// Meta will send delivery statuses and incoming messages here
-router.post("/webhook", (req, res) => {
-  const body = req.body;
-  if (body.object) {
-    console.log("Incoming Webhook Event:", JSON.stringify(body, null, 2));
-    res.sendStatus(200);
-  } else {
-    res.sendStatus(404);
   }
 });
 
