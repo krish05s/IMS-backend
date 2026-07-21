@@ -4,6 +4,8 @@ const puppeteer = require("puppeteer");
 const axios = require("axios");
 const cloudinary = require("cloudinary").v2;
 const { Readable } = require("stream");
+const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
+const qrcode = require('qrcode');
 
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
@@ -11,13 +13,116 @@ cloudinary.config({
   api_secret: process.env.CLOUDINARY_API_SECRET,
 });
 
+const fs = require('fs');
+const path = require('path');
+
+// WhatsApp Client State
+let qrCodeData = "";
+let isReady = false;
+let isAuthenticating = false;
+let client = null;
+
+const initializeWhatsApp = async () => {
+    try {
+        if (client) {
+            try { await client.destroy(); } catch (e) {}
+        }
+
+        const executablePath = await puppeteer.executablePath();
+        client = new Client({
+            authStrategy: new LocalAuth(),
+            webVersionCache: {
+                type: 'remote',
+                remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.2412.54.html',
+            },
+            puppeteer: { 
+                headless: true, 
+                executablePath: executablePath,
+                args: [
+                    '--no-sandbox', 
+                    '--disable-setuid-sandbox',
+                    '--disable-dev-shm-usage',
+                    '--disable-gpu',
+                    '--no-first-run',
+                    '--no-zygote',
+                    '--disable-features=IsolateOrigins,site-per-process',
+                    '--disable-site-isolation-trials'
+                ],
+                timeout: 60000
+            }
+        });
+
+        client.on('qr', async (qr) => {
+            try {
+                isAuthenticating = false;
+                qrCodeData = await qrcode.toDataURL(qr);
+                console.log('QR Code generated! Ready to scan on frontend.');
+            } catch(err) {
+                console.error("QR Code Error:", err);
+            }
+        });
+
+        client.on('authenticated', () => {
+            console.log('WhatsApp Authenticated! Loading chats...');
+            isAuthenticating = true;
+        });
+
+        client.on('ready', () => {
+            isReady = true;
+            isAuthenticating = false;
+            qrCodeData = "";
+            console.log('WhatsApp Client is ready!');
+        });
+
+        client.on('disconnected', async (reason) => {
+            console.log('WhatsApp Client disconnected:', reason);
+            isReady = false;
+            isAuthenticating = false;
+            qrCodeData = "";
+            
+            try { await client.destroy(); } catch (e) {}
+            
+            // Delete the auth folder to ensure a clean start after logout
+            if (reason === 'LOGOUT') {
+                const authPath = path.join(__dirname, '..', '.wwebjs_auth');
+                if (fs.existsSync(authPath)) {
+                    fs.rmSync(authPath, { recursive: true, force: true });
+                }
+            }
+            
+            setTimeout(() => {
+                initializeWhatsApp();
+            }, 3000);
+        });
+
+        await client.initialize();
+    } catch(err) {
+        console.error("Failed to initialize WhatsApp client:", err);
+    }
+};
+
+initializeWhatsApp();
+
+router.get("/status", (req, res) => {
+    res.json({
+        success: true,
+        isReady,
+        isAuthenticating,
+        qrCode: isReady ? null : qrCodeData
+    });
+});
+
 router.post("/send-bill", async (req, res) => {
   let browser;
   try {
-    const { phone, htmlContent, fileName, message } = req.body;
+    const { phone, htmlContent, fileName, message, returnBase64 } = req.body;
 
-    if (!phone || !htmlContent) {
-      return res.status(400).json({ success: false, message: "Missing phone or HTML content" });
+    if (!htmlContent) {
+      return res.status(400).json({ success: false, message: "Missing HTML content" });
+    }
+
+    if (!returnBase64 && !phone) {
+        return res.status(400).json({ success: false, message: "Phone number is required for direct sending." });
     }
 
     // 1. Generate PDF in memory
@@ -26,127 +131,70 @@ router.post("/send-bill", async (req, res) => {
       args: ["--no-sandbox", "--disable-setuid-sandbox"],
     });
     const page = await browser.newPage();
-    await page.setContent(htmlContent, { waitUntil: "networkidle2", timeout: 60000 });
+    // Use 'load' instead of 'networkidle2' to prevent timeouts from external resources
+    await page.setContent(htmlContent, { waitUntil: "load", timeout: 60000 });
     const pdfBuffer = await page.pdf({
       format: "A4",
       printBackground: true,
       margin: { top: "20px", bottom: "20px", left: "20px", right: "20px" },
     });
     await browser.close();
+    
+    // Puppeteer returns a Uint8Array, so convert to Buffer to safely encode to base64
+    const pdfBase64 = Buffer.from(pdfBuffer).toString('base64');
 
-    // 2. Upload to Cloudinary securely in 'bills' folder
-    const uploadToCloudinary = (buffer, filename) => {
-      return new Promise((resolve, reject) => {
-        const stream = cloudinary.uploader.upload_stream(
-          {
-            resource_type: "raw", // 'raw' is for non-image/video files like PDF
-            folder: "bills",
-            public_id: `${filename}_${Date.now()}.pdf`,
-          },
-          (error, result) => {
-            if (error) reject(error);
-            else resolve(result);
-          }
-        );
-        const readableStream = new Readable();
-        readableStream._read = () => { };
-        readableStream.push(buffer);
-        readableStream.push(null);
-        readableStream.pipe(stream);
+    if (returnBase64) {
+      return res.status(200).json({
+        success: true,
+        message: "PDF generated successfully!",
+        pdf_base64: pdfBase64
       });
-    };
-
-    const uploadResult = await uploadToCloudinary(pdfBuffer, fileName || "Invoice");
-    const documentUrl = uploadResult.secure_url;
-
-    // 3. Send WhatsApp via Meta Cloud API
-    const whatsappToken = process.env.WHATSAPP_TOKEN;
-    const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
-
-    if (!whatsappToken || !phoneNumberId) {
-      return res.status(500).json({ success: false, message: "WhatsApp API credentials missing in backend." });
     }
 
-    const payload = {
-      messaging_product: "whatsapp",
-      recipient_type: "individual",
-      to: phone,
-      type: "document",
-      document: {
-        link: documentUrl,
-        caption: message || "Here is your requested document.",
-        filename: `${fileName || "Invoice"}.pdf`
-      }
-    };
+    // Direct Sending via whatsapp-web.js
+    if (!isReady) {
+        return res.status(403).json({ success: false, message: "WhatsApp client is not connected. Please scan the QR code first." });
+    }
 
-    console.log("Sending WhatsApp payload:", JSON.stringify(payload, null, 2));
+    // Format phone number
+    const formattedPhone = phone.replace(/\D/g, ''); // Remove non-digits
+    const chatId = `${formattedPhone}@c.us`;
 
-    const whatsappResponse = await axios.post(
-      `https://graph.facebook.com/v17.0/${phoneNumberId}/messages`,
-      payload,
-      {
-        headers: {
-          Authorization: `Bearer ${whatsappToken}`,
-          "Content-Type": "application/json",
-        },
-      }
-    );
+    const media = new MessageMedia('application/pdf', pdfBase64, `${fileName}.pdf`);
+    
+    // Send message and attachment
+    await client.sendMessage(chatId, media, { caption: message });
 
     res.status(200).json({
       success: true,
-      message: "WhatsApp sent successfully!",
-      cloudinary_url: documentUrl,
-      whatsapp_response: whatsappResponse.data
+      message: "PDF sent successfully via WhatsApp!"
     });
 
   } catch (error) {
-    console.error("WhatsApp Send Error:", error.response?.data || error);
+    console.error("WhatsApp Send Error:", error);
     if (browser && typeof browser.close === 'function') await browser.close();
-
-    // Extract Meta API error message if available
-    let customMessage = "An error occurred while generating or sending the bill.";
-    if (error.response?.data?.error?.message) {
-      customMessage = error.response.data.error.message;
-    }
-
+    
     res.status(500).json({
       success: false,
-      message: customMessage,
+      message: "An error occurred while sending the bill.",
       error: error.message
     });
   }
 });
 
-// --- META WEBHOOK VERIFICATION (GET) ---
-// Meta will call this URL to verify the webhook setup
-router.get("/webhook", (req, res) => {
-  const VERIFY_TOKEN = process.env.WEBHOOK_VERIFY_TOKEN;
-
-  const mode = req.query["hub.mode"];
-  const token = req.query["hub.verify_token"];
-  const challenge = req.query["hub.challenge"];
-
-  if (mode && token) {
-    if (mode === "subscribe" && token === VERIFY_TOKEN) {
-      console.log("WEBHOOK_VERIFIED");
-      res.status(200).send(challenge);
+router.post("/logout", async (req, res) => {
+  try {
+    if (client && isReady) {
+      await client.logout();
+      isReady = false;
+      qrCodeData = "";
+      res.status(200).json({ success: true, message: "Successfully logged out from WhatsApp." });
     } else {
-      res.sendStatus(403);
+      res.status(400).json({ success: false, message: "Client is not connected." });
     }
-  } else {
-    res.status(400).send("Missing parameters");
-  }
-});
-
-// --- META WEBHOOK NOTIFICATIONS (POST) ---
-// Meta will send delivery statuses and incoming messages here
-router.post("/webhook", (req, res) => {
-  const body = req.body;
-  if (body.object) {
-    console.log("Incoming Webhook Event:", JSON.stringify(body, null, 2));
-    res.sendStatus(200);
-  } else {
-    res.sendStatus(404);
+  } catch (error) {
+    console.error("WhatsApp Logout Error:", error);
+    res.status(500).json({ success: false, message: "Failed to logout.", error: error.message });
   }
 });
 
