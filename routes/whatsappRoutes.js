@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const qrcode = require('qrcode');
 const pino = require('pino');
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, Browsers } = require('@whiskeysockets/baileys');
 
 // State
 let qrCodeData = "";
@@ -17,12 +17,14 @@ const authPath = path.join(__dirname, '..', '.auth_info_baileys');
 const initializeWhatsApp = async () => {
     try {
         const { state, saveCreds } = await useMultiFileAuthState(authPath);
+        const { version } = await fetchLatestBaileysVersion();
 
         sock = makeWASocket({
+            version,
             auth: state,
             printQRInTerminal: false,
             logger: pino({ level: 'silent' }),
-            browser: ['Micara IMS', 'Chrome', '1.0.0']
+            browser: Browsers.ubuntu('Desktop')
         });
 
         sock.ev.on('creds.update', saveCreds);
